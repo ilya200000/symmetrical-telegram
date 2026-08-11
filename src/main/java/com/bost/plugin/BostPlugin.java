@@ -24,11 +24,9 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
     @Override
     public void onEnable() {
-        // Настраиваем адреса серверов для перенаправления (если нужно через /bust join)
         servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
         servers.put("rpg", new InetSocketAddress("127.0.0.1", 15545));
 
-        // Порты для прямого межсерверного обмена валютой
         syncPorts.put("survival", 16544);
         syncPorts.put("rpg", 16545);
 
@@ -37,16 +35,14 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
         getCommand("bust").setTabCompleter(this);
 
-        // Запуск фонового сервера для приема валюты от других инстансов
         startSyncServer();
 
-        // Регистрация плейсхолдера для PlaceholderAPI, если он установлен
         if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new BostPlaceholderExpansion(this).register();
             getLogger().info("PlaceholderAPI expansion registered successfully!");
         }
 
-        getLogger().info("BOST ECONOMY GATEWAY INITIALIZED (DIRECT P2P)");
+        getLogger().info("BOST ECONOMY & TRANSFER GATEWAY INITIALIZED");
     }
 
     @Override
@@ -57,7 +53,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
         } catch (IOException ignored) {}
     }
 
-    // --- Сокеты для межсерверной синхронизации ---
     private void startSyncServer() {
         int myPort = (getServer().getPort() == 15545) ? 16545 : 16544;
 
@@ -95,7 +90,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
         }
     }
 
-    // --- Управление экономикой через файл ---
     public int getBalance(String playerName) {
         if (!ecoFile.exists()) return 0;
         try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile))) {
@@ -133,62 +127,121 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
         } catch (IOException ignored) {}
     }
 
+    public void setBalance(String playerName, int amount) {
+        int finalAmount = Math.max(0, amount);
+        setBalanceInternal(playerName, finalAmount);
+        sendBalanceToOtherServers(playerName, finalAmount);
+    }
+
     public void addBalance(String playerName, int amount) {
-        int current = getBalance(playerName);
-        int newBalance = current + amount;
-        setBalanceInternal(playerName, newBalance);
-        sendBalanceToOtherServers(playerName, newBalance);
+        if (amount <= 0) return;
+        int newBalance = getBalance(playerName) + amount;
+        setBalance(playerName, newBalance);
     }
 
     public boolean removeBalance(String playerName, int amount) {
+        if (amount <= 0) return false;
         int current = getBalance(playerName);
         if (current < amount) return false;
         int newBalance = current - amount;
-        setBalanceInternal(playerName, newBalance);
-        sendBalanceToOtherServers(playerName, newBalance);
+        setBalance(playerName, newBalance);
         return true;
     }
 
-    // --- Команды ---
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player)) return true;
         Player player = (Player) sender;
 
         if (command.getName().equalsIgnoreCase("bust")) {
-            if (args.length >= 3 && args[0].equalsIgnoreCase("pay")) {
-                String targetServer = args[1].toLowerCase();
-                int amount;
-                try {
-                    amount = Integer.parseInt(args[2]);
-                } catch (Exception e) {
-                    player.sendMessage("§cНеверная сумма!");
+            if (args.length >= 2) {
+                // Переход: /bust join <сервер>
+                if (args[0].equalsIgnoreCase("join")) {
+                    String target = args[1].toLowerCase();
+                    if (servers.containsKey(target)) {
+                        player.sendMessage("§bПеренаправляю на " + target + "...");
+                        InetSocketAddress address = servers.get(target);
+                        player.transfer(address.getHostString(), address.getPort());
+                    } else {
+                        player.sendMessage("§cСервер не найден!");
+                    }
                     return true;
                 }
 
-                if (amount <= 0) {
-                    player.sendMessage("§cСумма должна быть больше нуля!");
+                // Перевод валюты на сервер: /bust pay <сервер> <сумма>
+                if (args[0].equalsIgnoreCase("pay") && args.length >= 3) {
+                    String targetServer = args[1].toLowerCase();
+                    int amount;
+                    try {
+                        amount = Integer.parseInt(args[2]);
+                    } catch (Exception e) {
+                        player.sendMessage("§cНеверная сумма!");
+                        return true;
+                    }
+
+                    if (amount <= 0) {
+                        player.sendMessage("§cСумма должна быть больше нуля!");
+                        return true;
+                    }
+
+                    if (!servers.containsKey(targetServer)) {
+                        player.sendMessage("§cТакого сервера не существует!");
+                        return true;
+                    }
+
+                    if (!removeBalance(player.getName(), amount)) {
+                        player.sendMessage("§cУ вас недостаточно средств! Баланс: " + getBalance(player.getName()));
+                        return true;
+                    }
+
+                    player.sendMessage("§aВы успешно перевели " + amount + " на сервер §e" + targetServer + "§a!");
                     return true;
                 }
 
-                if (!servers.containsKey(targetServer)) {
-                    player.sendMessage("§cТакого сервера не существует!");
+                // Выдача валюты: /bust give <игрок> <сумма>
+                if (args[0].equalsIgnoreCase("give") && args.length >= 3) {
+                    if (!player.hasPermission("bost.admin")) {
+                        player.sendMessage("§cУ вас нет прав!");
+                        return true;
+                    }
+                    String targetName = args[1];
+                    int amount;
+                    try {
+                        amount = Integer.parseInt(args[2]);
+                    } catch (Exception e) {
+                        player.sendMessage("§cНеверная сумма!");
+                        return true;
+                    }
+
+                    addBalance(targetName, amount);
+                    player.sendMessage("§aВы выдали " + amount + " монет игроку §e" + targetName + "§a!");
                     return true;
                 }
 
-                if (!removeBalance(player.getName(), amount)) {
-                    player.sendMessage("§cУ вас недостаточно средств! Баланс: " + getBalance(player.getName()));
+                // Забрать валюту: /bust take <игрок> <сумма>
+                if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
+                    if (!player.hasPermission("bost.admin")) {
+                        player.sendMessage("§cУ вас нет прав!");
+                        return true;
+                    }
+                    String targetName = args[1];
+                    int amount;
+                    try {
+                        amount = Integer.parseInt(args[2]);
+                    } catch (Exception e) {
+                        player.sendMessage("§cНеверная сумма!");
+                        return true;
+                    }
+
+                    int current = getBalance(targetName);
+                    int newBal = Math.max(0, current - amount);
+                    setBalance(targetName, newBal);
+                    player.sendMessage("§aВы забрали " + amount + " у игрока §e" + targetName + "§a. Остаток: " + newBal);
                     return true;
                 }
-
-                player.sendMessage("§aВы успешно списали " + amount + " и перевели на сервер §e" + targetServer + "§a!");
-                // Здесь же можно сразу отправить игрока туда, если хочется:
-                // InetSocketAddress addr = servers.get(targetServer);
-                // player.transfer(addr.getHostString(), addr.getPort());
-                return true;
             }
 
-            player.sendMessage("§cИспользование: /bust pay <сервер> <сумма>");
+            player.sendMessage("§cИспользование: /bust <join|pay|give|take> ...");
             return true;
         }
 
@@ -198,17 +251,20 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
-            if (args.length == 1) return Collections.singletonList("pay");
-            if (args.length == 2 && args[0].equalsIgnoreCase("pay")) {
-                return servers.keySet().stream()
-                        .filter(s -> s.startsWith(args[1].toLowerCase()))
-                        .collect(Collectors.toList());
+            if (args.length == 1) {
+                return Arrays.asList("join", "pay", "give", "take");
+            }
+            if (args.length == 2) {
+                if (args[0].equalsIgnoreCase("join") || args[0].equalsIgnoreCase("pay")) {
+                    return servers.keySet().stream()
+                            .filter(s -> s.startsWith(args[1].toLowerCase()))
+                            .collect(Collectors.toList());
+                }
             }
         }
         return Collections.emptyList();
     }
 
-    // --- Плейсхолдер для PlaceholderAPI ---
     public static class BostPlaceholderExpansion extends PlaceholderExpansion {
         private final BostPlugin plugin;
 
