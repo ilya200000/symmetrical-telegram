@@ -37,7 +37,9 @@ public class BostPlugin extends JavaPlugin {
                 if (servers.containsKey(target)) {
                     player.sendMessage("§bПеренаправляю на " + target + "...");
 
-                    player.transfer(servers.get(target));
+                    // Исправление: передаем хост и порт отдельно
+                    InetSocketAddress address = servers.get(target);
+                    player.transfer(address.getHostString(), address.getPort());
                 } else {
                     player.sendMessage("§cСервер не найден!");
                 }
