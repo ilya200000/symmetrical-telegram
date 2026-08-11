@@ -22,8 +22,12 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     private Map<String, InetSocketAddress> servers = new HashMap<>();
     private Map<String, Integer> syncPorts = new HashMap<>();
     private File ecoFile;
+    private File authFile;
     private ServerSocket socketServer;
     private boolean listening = true;
+
+    // Кэш для авторизованных игроков на текущем сервере
+    private final Set<String> loggedInPlayers = new HashSet<>();
 
     @Override
     public void onEnable() {
@@ -35,6 +39,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
         if (!getDataFolder().exists()) getDataFolder().mkdir();
         ecoFile = new File(getDataFolder(), "economy.txt");
+        authFile = new File(getDataFolder(), "auth.txt");
 
         getCommand("bust").setTabCompleter(this);
 
@@ -69,11 +74,20 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     clientSocket.close();
 
                     if (message != null) {
-                        // Формат: TOKEN:ECO:Игрок:Баланс
                         String[] parts = message.split(":", 4);
                         if (parts.length >= 4 && parts[0].equals(SECRET_TOKEN)) {
                             if (parts[1].equals("ECO")) {
                                 setBalanceInternal(parts[2], Integer.parseInt(parts[3]));
+                            } else if (parts[1].equals("AUTH")) {
+                                registerInternal(parts[2], parts[3]);
+                            } else if (parts[1].equals("LOGIN")) {
+                                Bukkit.getScheduler().runTask(this, () -> {
+                                    Player p = Bukkit.getPlayerExact(parts[2]);
+                                    if (p != null && p.isOnline()) {
+                                        loggedInPlayers.add(p.getName().toLowerCase());
+                                        p.sendMessage("§aВы успешно авторизованы (синхронизировано с другого сервера)!");
+                                    }
+                                });
                             }
                         }
                     }
@@ -90,11 +104,94 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             new Thread(() -> {
                 try (Socket socket = new Socket("127.0.0.1", port);
                      PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
-                    // Отправляем пакет вместе с токеном
                     writer.println(SECRET_TOKEN + ":ECO:" + playerName + ":" + balance);
                 } catch (IOException ignored) {}
             }).start();
         }
+    }
+
+    private void sendAuthToOtherServers(String playerName, String passwordHash) {
+        for (String serverKey : servers.keySet()) {
+            Integer port = syncPorts.get(serverKey);
+            if (port == null) continue;
+
+            new Thread(() -> {
+                try (Socket socket = new Socket("127.0.0.1", port);
+                     PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
+                    writer.println(SECRET_TOKEN + ":AUTH:" + playerName + ":" + passwordHash);
+                } catch (IOException ignored) {}
+            }).start();
+        }
+    }
+
+    private void sendLoginToOtherServers(String playerName) {
+        for (String serverKey : servers.keySet()) {
+            Integer port = syncPorts.get(serverKey);
+            if (port == null) continue;
+
+            new Thread(() -> {
+                try (Socket socket = new Socket("127.0.0.1", port);
+                     PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
+                    writer.println(SECRET_TOKEN + ":LOGIN:" + playerName);
+                } catch (IOException ignored) {}
+            }).start();
+        }
+    }
+
+    public boolean isRegistered(String playerName) {
+        if (!authFile.exists()) return false;
+        try (BufferedReader reader = new BufferedReader(new FileReader(authFile))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":");
+                if (parts.length == 2 && parts[0].equalsIgnoreCase(playerName)) {
+                    return true;
+                }
+            }
+        } catch (IOException ignored) {}
+        return false;
+    }
+
+    public String getPasswordHash(String playerName) {
+        if (!authFile.exists()) return null;
+        try (BufferedReader reader = new BufferedReader(new FileReader(authFile))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":");
+                if (parts.length == 2 && parts[0].equalsIgnoreCase(playerName)) {
+                    return parts[1];
+                }
+            }
+        } catch (IOException ignored) {}
+        return null;
+    }
+
+    private synchronized void registerInternal(String playerName, String passwordHash) {
+        Map<String, String> accounts = new HashMap<>();
+        if (authFile.exists()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(authFile))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split(":", 2);
+                    if (parts.length == 2) {
+                        accounts.put(parts[0], parts[1]);
+                    }
+                }
+            } catch (IOException ignored) {}
+        }
+
+        accounts.put(playerName.toLowerCase(), passwordHash);
+
+        try (PrintWriter writer = new PrintWriter(new FileWriter(authFile, false))) {
+            for (Map.Entry<String, String> entry : accounts.entrySet()) {
+                writer.println(entry.getKey() + ":" + entry.getValue());
+            }
+        } catch (IOException ignored) {}
+    }
+
+    public void registerAccount(String playerName, String passwordHash) {
+        registerInternal(playerName, passwordHash);
+        sendAuthToOtherServers(playerName, passwordHash);
     }
 
     public int getBalance(String playerName) {
@@ -159,8 +256,57 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (!(sender instanceof Player)) return true;
         Player player = (Player) sender;
+        String pName = player.getName().toLowerCase();
 
         if (command.getName().equalsIgnoreCase("bust")) {
+            if (args.length >= 1 && args[0].equalsIgnoreCase("register")) {
+                if (args.length < 2) {
+                    player.sendMessage("§cИспользование: /bust register <пароль>");
+                    return true;
+                }
+                if (isRegistered(pName)) {
+                    player.sendMessage("§cВы уже зарегистрированы!");
+                    return true;
+                }
+                registerAccount(pName, args[1]);
+                loggedInPlayers.add(pName);
+                player.sendMessage("§aВы успешно зарегистрировались и авторизованы!");
+                return true;
+            }
+
+            if (args.length >= 1 && args[0].equalsIgnoreCase("login")) {
+                if (args.length < 2) {
+                    player.sendMessage("§cИспользование: /bust login <пароль>");
+                    return true;
+                }
+                if (loggedInPlayers.contains(pName)) {
+                    player.sendMessage("§cВы уже авторизованы!");
+                    return true;
+                }
+                if (!isRegistered(pName)) {
+                    player.sendMessage("§cВы не зарегистрированы! Используйте /bust register <пароль>");
+                    return true;
+                }
+                String correctPass = getPasswordHash(pName);
+                if (correctPass != null && correctPass.equals(args[1])) {
+                    loggedInPlayers.add(pName);
+                    sendLoginToOtherServers(player.getName());
+                    player.sendMessage("§aВы успешно авторизованы!");
+                } else {
+                    player.sendMessage("§cНеверный пароль!");
+                }
+                return true;
+            }
+
+            if (!loggedInPlayers.contains(pName)) {
+                if (isRegistered(pName)) {
+                    player.sendMessage("§cПожалуйста, авторизуйтесь: /bust login <пароль>");
+                } else {
+                    player.sendMessage("§cПожалуйста, зарегистрируйтесь: /bust register <пароль>");
+                }
+                return true;
+            }
+
             if (args.length == 0 || args[0].equalsIgnoreCase("balance")) {
                 int balance = getBalance(player.getName());
                 player.sendMessage("§aВаш баланс: §e" + balance + " монет");
@@ -250,7 +396,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                 }
             }
 
-            player.sendMessage("§cИспользование: /bust [balance|join|pay|give|take] ...");
+            player.sendMessage("§cИспользование: /bust [register|login|balance|join|pay|give|take] ...");
             return true;
         }
 
@@ -261,7 +407,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
             if (args.length == 1) {
-                return Arrays.asList("balance", "join", "pay", "give", "take");
+                return Arrays.asList("register", "login", "balance", "join", "pay", "give", "take");
             }
             if (args.length == 2) {
                 if (args[0].equalsIgnoreCase("join") || args[0].equalsIgnoreCase("pay")) {
