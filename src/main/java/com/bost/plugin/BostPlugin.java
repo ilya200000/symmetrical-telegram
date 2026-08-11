@@ -1,53 +1,248 @@
 package com.bost.plugin;
 
+import me.clip.placeholderapi.expansion.PlaceholderExpansion;
+import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
+import org.jetbrains.annotations.NotNull;
 
-import java.net.InetSocketAddress;
-import java.util.HashMap;
-import java.util.Map;
+import java.io.*;
+import java.net.*;
+import java.util.*;
+import java.util.stream.Collectors;
 
-public class BostPlugin extends JavaPlugin {
+public class BostPlugin extends JavaPlugin implements TabCompleter {
 
     private Map<String, InetSocketAddress> servers = new HashMap<>();
+    private Map<String, Integer> syncPorts = new HashMap<>();
+    private File ecoFile;
+    private ServerSocket socketServer;
+    private boolean listening = true;
 
     @Override
     public void onEnable() {
+        // Настраиваем адреса серверов для перенаправления (если нужно через /bust join)
         servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
         servers.put("rpg", new InetSocketAddress("127.0.0.1", 15545));
 
-        getLogger().info("BOST NETWORK GATEWAY (TRANSFER MODE) INITIALIZED");
+        // Порты для прямого межсерверного обмена валютой
+        syncPorts.put("survival", 16544);
+        syncPorts.put("rpg", 16545);
+
+        if (!getDataFolder().exists()) getDataFolder().mkdir();
+        ecoFile = new File(getDataFolder(), "economy.txt");
+
+        getCommand("bust").setTabCompleter(this);
+
+        // Запуск фонового сервера для приема валюты от других инстансов
+        startSyncServer();
+
+        // Регистрация плейсхолдера для PlaceholderAPI, если он установлен
+        if (Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            new BostPlaceholderExpansion(this).register();
+            getLogger().info("PlaceholderAPI expansion registered successfully!");
+        }
+
+        getLogger().info("BOST ECONOMY GATEWAY INITIALIZED (DIRECT P2P)");
     }
 
     @Override
+    public void onDisable() {
+        listening = false;
+        try {
+            if (socketServer != null) socketServer.close();
+        } catch (IOException ignored) {}
+    }
+
+    // --- Сокеты для межсерверной синхронизации ---
+    private void startSyncServer() {
+        int myPort = (getServer().getPort() == 15545) ? 16545 : 16544;
+
+        new Thread(() -> {
+            try {
+                socketServer = new ServerSocket(myPort);
+                while (listening) {
+                    Socket clientSocket = socketServer.accept();
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
+                    String message = reader.readLine();
+                    clientSocket.close();
+
+                    if (message != null) {
+                        String[] parts = message.split(":", 3);
+                        if (parts.length >= 3 && parts[0].equals("ECO")) {
+                            setBalanceInternal(parts[1], Integer.parseInt(parts[2]));
+                        }
+                    }
+                }
+            } catch (IOException ignored) {}
+        }).start();
+    }
+
+    private void sendBalanceToOtherServers(String playerName, int balance) {
+        for (String serverKey : servers.keySet()) {
+            Integer port = syncPorts.get(serverKey);
+            if (port == null) continue;
+
+            new Thread(() -> {
+                try (Socket socket = new Socket("127.0.0.1", port);
+                     PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
+                    writer.println("ECO:" + playerName + ":" + balance);
+                } catch (IOException ignored) {}
+            }).start();
+        }
+    }
+
+    // --- Управление экономикой через файл ---
+    public int getBalance(String playerName) {
+        if (!ecoFile.exists()) return 0;
+        try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split(":");
+                if (parts.length == 2 && parts[0].equalsIgnoreCase(playerName)) {
+                    return Integer.parseInt(parts[1]);
+                }
+            }
+        } catch (IOException | NumberFormatException ignored) {}
+        return 0;
+    }
+
+    private synchronized void setBalanceInternal(String playerName, int amount) {
+        Map<String, Integer> balances = new HashMap<>();
+        if (ecoFile.exists()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(ecoFile))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String[] parts = line.split(":", 2);
+                    if (parts.length == 2) {
+                        balances.put(parts[0], Integer.parseInt(parts[1]));
+                    }
+                }
+            } catch (IOException | NumberFormatException ignored) {}
+        }
+
+        balances.put(playerName, amount);
+
+        try (PrintWriter writer = new PrintWriter(new FileWriter(ecoFile, false))) {
+            for (Map.Entry<String, Integer> entry : balances.entrySet()) {
+                writer.println(entry.getKey() + ":" + entry.getValue());
+            }
+        } catch (IOException ignored) {}
+    }
+
+    public void addBalance(String playerName, int amount) {
+        int current = getBalance(playerName);
+        int newBalance = current + amount;
+        setBalanceInternal(playerName, newBalance);
+        sendBalanceToOtherServers(playerName, newBalance);
+    }
+
+    public boolean removeBalance(String playerName, int amount) {
+        int current = getBalance(playerName);
+        if (current < amount) return false;
+        int newBalance = current - amount;
+        setBalanceInternal(playerName, newBalance);
+        sendBalanceToOtherServers(playerName, newBalance);
+        return true;
+    }
+
+    // --- Команды ---
+    @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player)) {
+        if (!(sender instanceof Player)) return true;
+        Player player = (Player) sender;
+
+        if (command.getName().equalsIgnoreCase("bust")) {
+            if (args.length >= 3 && args[0].equalsIgnoreCase("pay")) {
+                String targetServer = args[1].toLowerCase();
+                int amount;
+                try {
+                    amount = Integer.parseInt(args[2]);
+                } catch (Exception e) {
+                    player.sendMessage("§cНеверная сумма!");
+                    return true;
+                }
+
+                if (amount <= 0) {
+                    player.sendMessage("§cСумма должна быть больше нуля!");
+                    return true;
+                }
+
+                if (!servers.containsKey(targetServer)) {
+                    player.sendMessage("§cТакого сервера не существует!");
+                    return true;
+                }
+
+                if (!removeBalance(player.getName(), amount)) {
+                    player.sendMessage("§cУ вас недостаточно средств! Баланс: " + getBalance(player.getName()));
+                    return true;
+                }
+
+                player.sendMessage("§aВы успешно списали " + amount + " и перевели на сервер §e" + targetServer + "§a!");
+                // Здесь же можно сразу отправить игрока туда, если хочется:
+                // InetSocketAddress addr = servers.get(targetServer);
+                // player.transfer(addr.getHostString(), addr.getPort());
+                return true;
+            }
+
+            player.sendMessage("§cИспользование: /bust pay <сервер> <сумма>");
             return true;
         }
 
-        Player player = (Player) sender;
+        return false;
+    }
 
-        if (label.equalsIgnoreCase("bust") && args.length >= 2) {
-            if (args[0].equalsIgnoreCase("join")) {
-
-                String target = args[1].toLowerCase();
-
-                if (servers.containsKey(target)) {
-                    player.sendMessage("§bПеренаправляю на " + target + "...");
-
-                    // Исправление: передаем хост и порт отдельно
-                    InetSocketAddress address = servers.get(target);
-                    player.transfer(address.getHostString(), address.getPort());
-                } else {
-                    player.sendMessage("§cСервер не найден!");
-                }
-
-                return true;
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (command.getName().equalsIgnoreCase("bust")) {
+            if (args.length == 1) return Collections.singletonList("pay");
+            if (args.length == 2 && args[0].equalsIgnoreCase("pay")) {
+                return servers.keySet().stream()
+                        .filter(s -> s.startsWith(args[1].toLowerCase()))
+                        .collect(Collectors.toList());
             }
         }
+        return Collections.emptyList();
+    }
 
-        return false;
+    // --- Плейсхолдер для PlaceholderAPI ---
+    public static class BostPlaceholderExpansion extends PlaceholderExpansion {
+        private final BostPlugin plugin;
+
+        public BostPlaceholderExpansion(BostPlugin plugin) {
+            this.plugin = plugin;
+        }
+
+        @Override
+        public @NotNull String getIdentifier() {
+            return "bost";
+        }
+
+        @Override
+        public @NotNull String getAuthor() {
+            return "Vova";
+        }
+
+        @Override
+        public @NotNull String getVersion() {
+            return "1.0";
+        }
+
+        @Override
+        public boolean persist() {
+            return true;
+        }
+
+        @Override
+        public String onPlaceholderRequest(Player player, @NotNull String params) {
+            if (player == null) return "";
+            if (params.equalsIgnoreCase("balance")) {
+                return String.valueOf(plugin.getBalance(player.getName()));
+            }
+            return null;
+        }
     }
 }
