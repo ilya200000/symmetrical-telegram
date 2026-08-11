@@ -154,6 +154,13 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
         Player player = (Player) sender;
 
         if (command.getName().equalsIgnoreCase("bust")) {
+            // Просмотр баланса: /bust или /bust balance
+            if (args.length == 0 || args[0].equalsIgnoreCase("balance")) {
+                int balance = getBalance(player.getName());
+                player.sendMessage("§aВаш баланс: §e" + balance + " монет");
+                return true;
+            }
+
             if (args.length >= 2) {
                 // Переход: /bust join <сервер>
                 if (args[0].equalsIgnoreCase("join")) {
@@ -241,7 +248,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                 }
             }
 
-            player.sendMessage("§cИспользование: /bust <join|pay|give|take> ...");
+            player.sendMessage("§cИспользование: /bust [balance|join|pay|give|take] ...");
             return true;
         }
 
@@ -252,7 +259,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (command.getName().equalsIgnoreCase("bust")) {
             if (args.length == 1) {
-                return Arrays.asList("join", "pay", "give", "take");
+                return Arrays.asList("balance", "join", "pay", "give", "take");
             }
             if (args.length == 2) {
                 if (args[0].equalsIgnoreCase("join") || args[0].equalsIgnoreCase("pay")) {
