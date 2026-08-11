@@ -4,16 +4,17 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+
 import java.net.InetSocketAddress;
 import java.util.HashMap;
 import java.util.Map;
 
 public class BostPlugin extends JavaPlugin {
+
     private Map<String, InetSocketAddress> servers = new HashMap<>();
 
     @Override
     public void onEnable() {
-        // Указываем адрес и порт серверов
         servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
         servers.put("rpg", new InetSocketAddress("127.0.0.1", 15545));
 
@@ -22,22 +23,29 @@ public class BostPlugin extends JavaPlugin {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player)) return true;
+        if (!(sender instanceof Player)) {
+            return true;
+        }
+
         Player player = (Player) sender;
 
         if (label.equalsIgnoreCase("bust") && args.length >= 2) {
             if (args[0].equalsIgnoreCase("join")) {
+
                 String target = args[1].toLowerCase();
+
                 if (servers.containsKey(target)) {
                     player.sendMessage("§bПеренаправляю на " + target + "...");
-                    // Вызываем метод переноса
+
                     player.transfer(servers.get(target));
                 } else {
                     player.sendMessage("§cСервер не найден!");
                 }
+
                 return true;
             }
         }
+
         return false;
     }
 }
