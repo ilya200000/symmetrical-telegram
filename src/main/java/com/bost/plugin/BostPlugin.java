@@ -16,6 +16,9 @@ import java.util.stream.Collectors;
 
 public class BostPlugin extends JavaPlugin implements TabCompleter {
 
+    // Секретный токен для межсерверной защиты (должен быть одинаковым на всех серверах сети!)
+    private static final String SECRET_TOKEN = "BostSecretKey_2026_SecureSync";
+
     private Map<String, InetSocketAddress> servers = new HashMap<>();
     private Map<String, Integer> syncPorts = new HashMap<>();
     private File ecoFile;
@@ -42,7 +45,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             getLogger().info("PlaceholderAPI expansion registered successfully!");
         }
 
-        getLogger().info("BOST ECONOMY & TRANSFER GATEWAY INITIALIZED");
+        getLogger().info("BOST SECURE ECONOMY & TRANSFER GATEWAY INITIALIZED");
     }
 
     @Override
@@ -66,9 +69,12 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     clientSocket.close();
 
                     if (message != null) {
-                        String[] parts = message.split(":", 3);
-                        if (parts.length >= 3 && parts[0].equals("ECO")) {
-                            setBalanceInternal(parts[1], Integer.parseInt(parts[2]));
+                        // Формат: TOKEN:ECO:Игрок:Баланс
+                        String[] parts = message.split(":", 4);
+                        if (parts.length >= 4 && parts[0].equals(SECRET_TOKEN)) {
+                            if (parts[1].equals("ECO")) {
+                                setBalanceInternal(parts[2], Integer.parseInt(parts[3]));
+                            }
                         }
                     }
                 }
@@ -84,7 +90,8 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             new Thread(() -> {
                 try (Socket socket = new Socket("127.0.0.1", port);
                      PrintWriter writer = new PrintWriter(socket.getOutputStream(), true)) {
-                    writer.println("ECO:" + playerName + ":" + balance);
+                    // Отправляем пакет вместе с токеном
+                    writer.println(SECRET_TOKEN + ":ECO:" + playerName + ":" + balance);
                 } catch (IOException ignored) {}
             }).start();
         }
@@ -154,7 +161,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
         Player player = (Player) sender;
 
         if (command.getName().equalsIgnoreCase("bust")) {
-            // Просмотр баланса: /bust или /bust balance
             if (args.length == 0 || args[0].equalsIgnoreCase("balance")) {
                 int balance = getBalance(player.getName());
                 player.sendMessage("§aВаш баланс: §e" + balance + " монет");
@@ -162,7 +168,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             }
 
             if (args.length >= 2) {
-                // Переход: /bust join <сервер>
                 if (args[0].equalsIgnoreCase("join")) {
                     String target = args[1].toLowerCase();
                     if (servers.containsKey(target)) {
@@ -175,7 +180,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     return true;
                 }
 
-                // Перевод валюты на сервер: /bust pay <сервер> <сумма>
                 if (args[0].equalsIgnoreCase("pay") && args.length >= 3) {
                     String targetServer = args[1].toLowerCase();
                     int amount;
@@ -205,7 +209,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     return true;
                 }
 
-                // Выдача валюты: /bust give <игрок> <сумма>
                 if (args[0].equalsIgnoreCase("give") && args.length >= 3) {
                     if (!player.hasPermission("bost.admin")) {
                         player.sendMessage("§cУ вас нет прав!");
@@ -225,7 +228,6 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                     return true;
                 }
 
-                // Забрать валюту: /bust take <игрок> <сумма>
                 if (args[0].equalsIgnoreCase("take") && args.length >= 3) {
                     if (!player.hasPermission("bost.admin")) {
                         player.sendMessage("§cУ вас нет прав!");
