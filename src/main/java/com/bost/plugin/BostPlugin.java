@@ -28,10 +28,10 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     @Override
     public void onEnable() {
         servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
-        servers.put("Lobby", new InetSocketAddress("127.0.0.1", 15545));
+        servers.put("lobby", new InetSocketAddress("127.0.0.1", 15545));
 
         syncPorts.put("survival", 16544);
-        syncPorts.put("Lobby", 16545);
+        syncPorts.put("lobby", 16545);
 
         if (!getDataFolder().exists()) getDataFolder().mkdir();
         ecoFile = new File(getDataFolder(), "economy.txt");
@@ -45,7 +45,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
             getLogger().info("PlaceholderAPI expansion registered successfully!");
         }
 
-        getLogger().info("BOST SECURE ECONOMY & TRANSFER GATEWAY INITIALIZED");
+        getLogger().info("BOST SECURE ECONOMY & TRANSFER GATEWAY INITIALIZED (Port: " + getServer().getPort() + ")");
     }
 
     @Override
@@ -57,11 +57,20 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     }
 
     private void startSyncServer() {
-        int myPort = (getServer().getPort() == 15545) ? 16545 : 16544;
+        int myPort = 16544;
+        int currentPort = getServer().getPort();
+        
+        if (currentPort == 15545) {
+            myPort = 16545;
+        } else if (currentPort == 15544) {
+            myPort = 16544;
+        }
 
+        final int finalPort = myPort;
         new Thread(() -> {
             try {
-                socketServer = new ServerSocket(myPort);
+                socketServer = new ServerSocket(finalPort);
+                getLogger().info("Sync server started successfully on port " + finalPort);
                 while (listening) {
                     Socket clientSocket = socketServer.accept();
                     BufferedReader reader = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
@@ -78,7 +87,9 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
                         }
                     }
                 }
-            } catch (IOException ignored) {}
+            } catch (IOException e) {
+                getLogger().warning("Could not start sync server on port " + finalPort + ": " + e.getMessage());
+            }
         }).start();
     }
 
@@ -288,7 +299,7 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
 
         @Override
         public @NotNull String getAuthor() {
-            return "Bust";
+            return "Vova";
         }
 
         @Override
