@@ -28,10 +28,10 @@ public class BostPlugin extends JavaPlugin implements TabCompleter {
     @Override
     public void onEnable() {
         servers.put("survival", new InetSocketAddress("127.0.0.1", 15544));
-        servers.put("rpg", new InetSocketAddress("127.0.0.1", 15545));
+        servers.put("Lobby", new InetSocketAddress("127.0.0.1", 15545));
 
         syncPorts.put("survival", 16544);
-        syncPorts.put("rpg", 16545);
+        syncPorts.put("Lobby", 16545);
 
         if (!getDataFolder().exists()) getDataFolder().mkdir();
         ecoFile = new File(getDataFolder(), "economy.txt");
